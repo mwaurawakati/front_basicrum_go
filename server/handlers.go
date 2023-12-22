@@ -24,6 +24,7 @@ func (s *Server) catcher(w http.ResponseWriter, r *http.Request) {
 
 	// create an event from http request
 	event, err := newEventFromRequest(r)
+	log.Println(event)
 	if err != nil {
 		log.Printf("failed to parse request %+v", err)
 		return
@@ -205,4 +206,14 @@ func (*Server) headersNoCache(w http.ResponseWriter, statusCode int) {
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Expires", "Fri, 01 Jan 1990 00:00:00 GMT")
 	w.WriteHeader(statusCode)
+}
+
+//  Access middleware
+func AccessMiddleWare(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request){
+		//check for authetication
+
+		h.ServeHTTP(w,r)
+
+	})
 }

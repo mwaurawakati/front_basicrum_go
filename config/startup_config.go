@@ -31,10 +31,10 @@ type StartupConfig struct {
 		Token string `envconfig:"BRUM_PRIVATE_API_TOKEN"`
 	}
 	Database struct {
-		Host         string `required:"true" envconfig:"BRUM_DATABASE_HOST"`
+		Host         string `required:"true" envconfig:"BRUM_DATABASE_HOST" default:"localhost"`
 		Port         int16  `required:"true" envconfig:"BRUM_DATABASE_PORT" default:"9000"`
 		Username     string `required:"true" envconfig:"BRUM_DATABASE_USERNAME" default:"default"`
-		Password     string `required:"true" envconfig:"BRUM_DATABASE_PASSWORD"`
+		Password     string `required:"true" envconfig:"BRUM_DATABASE_PASSWORD" default:"1234"`
 		DatabaseName string `required:"true" envconfig:"BRUM_DATABASE_NAME" default:"default"`
 		TablePrefix  string `envconfig:"BRUM_DATABASE_TABLE_PREFIX"`
 	}

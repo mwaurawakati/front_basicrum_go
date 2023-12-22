@@ -62,6 +62,11 @@ func (s *Service) SaveAsync(event *types.Event) {
 	}()
 }
 
+// 
+func GetData() {
+
+}
+
 // Run process the events from the channel and save them in datastore (click house)
 func (s *Service) Run() {
 	updateHostTicker := time.NewTicker(hostUpdateDuration)
