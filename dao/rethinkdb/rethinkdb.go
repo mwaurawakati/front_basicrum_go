@@ -1,61 +1,49 @@
-//go:build clickhouse
-// +build clickhouse
+//go:build rethinkdb
+// +build rethinkdb
 
-// Package clickhouse s a database adapter for clickhouse DB.
-
-package clickhouse
+// Package rethinkdb s a database adapter for RethinkDB.
+package rethinkdb
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"log"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/basicrum/front_basicrum_go/beacon"
 	"github.com/basicrum/front_basicrum_go/store"
-	"github.com/basicrum/front_basicrum_go/types"
+	rdb "gopkg.in/rethinkdb/rethinkdb-go.v6"
 )
 
 // adapter holds RethinkDb connection data.
 type adapter struct {
-	conn   clickhouse.Conn
+	conn   *rdb.Session
 	dbName string
 	// Maximum number of records to return
 	maxResults int
 	version    int
-	prefix     string
 }
 
 const (
-	defaultHost     = "localhost:9000"
+	defaultHost     = "localhost:28015"
 	defaultDatabase = "default"
 
 	adpVersion = 113
 
-	adapterName = "clickhouse"
+	adapterName = "rethinkdb"
 
 	defaultMaxResults = 1024
-	// This is capped by the Session's send queue limit (128).
-	defaultMaxMessageResults = 100
 )
 
-const (
-	baseTableName           = "webperf_rum_events"
-	baseHostsTableName      = "webperf_rum_hostnames"
-	baseOwnerHostsTableName = "webperf_rum_own_hostnames"
-	tablePrefixPlaceholder  = "{prefix}"
-	bufferSize              = 1024
-)
-
+// See https://godoc.org/github.com/rethinkdb/rethinkdb-go#ConnectOpts for explanations.
 type configType struct {
 	Database          string      `json:"database,omitempty"`
 	Addresses         interface{} `json:"addresses,omitempty"`
 	Username          string      `json:"username,omitempty"`
 	Password          string      `json:"password,omitempty"`
+	AuthKey           string      `json:"authkey,omitempty"`
 	Timeout           int         `json:"timeout,omitempty"`
+	WriteTimeout      int         `json:"write_timeout,omitempty"`
 	ReadTimeout       int         `json:"read_timeout,omitempty"`
 	KeepAlivePeriod   int         `json:"keep_alive_timeout,omitempty"`
 	UseJSONNumber     bool        `json:"use_json_number,omitempty"`
@@ -69,37 +57,37 @@ type configType struct {
 // Open initializes rethinkdb session
 func (a *adapter) Open(jsonconfig json.RawMessage) error {
 	if a.conn != nil {
-		return errors.New("adapter clickhouse is already connected")
+		return errors.New("adapter rethinkdb is already connected")
 	}
 
 	if len(jsonconfig) < 2 {
-		return errors.New("adapter clickhousedb missing config")
+		return errors.New("adapter rethinkdb missing config")
 	}
 
 	var err error
 	var config configType
 	if err = json.Unmarshal(jsonconfig, &config); err != nil {
-		return errors.New("adapter clickhouse failed to parse config: " + err.Error())
+		return errors.New("adapter rethinkdb failed to parse config: " + err.Error())
 	}
-	log.Println(config)
-	var opts clickhouse.Options
+
+	var opts rdb.ConnectOpts
 
 	if config.Addresses == nil {
-		opts.Addr = []string{defaultHost}
+		opts.Address = defaultHost
 	} else if host, ok := config.Addresses.(string); ok {
-		opts.Addr = []string{host}
+		opts.Address = host
 	} else if ihosts, ok := config.Addresses.([]interface{}); ok && len(ihosts) > 0 {
 		hosts := make([]string, len(ihosts))
 		for i, ih := range ihosts {
 			h, ok := ih.(string)
 			if !ok || h == "" {
-				return errors.New("adapter clickhouse invalid config.Addresses value")
+				return errors.New("adapter rethinkdb invalid config.Addresses value")
 			}
 			hosts[i] = h
 		}
-		opts.Addr = hosts
+		opts.Addresses = hosts
 	} else {
-		return errors.New("adapter clickhouse failed to parse config.Addresses")
+		return errors.New("adapter rethinkdb failed to parse config.Addresses")
 	}
 
 	if config.Database == "" {
@@ -112,22 +100,30 @@ func (a *adapter) Open(jsonconfig json.RawMessage) error {
 		a.maxResults = defaultMaxResults
 	}
 
-	opts.Auth.Database = a.dbName
-	opts.Auth.Username = config.Username
-	opts.Auth.Password = config.Password
-	opts.DialTimeout = time.Duration(config.Timeout) * time.Second
+	opts.Database = a.dbName
+	opts.Username = config.Username
+	opts.Password = config.Password
+	opts.AuthKey = config.AuthKey
+	opts.Timeout = time.Duration(config.Timeout) * time.Second
+	opts.WriteTimeout = time.Duration(config.WriteTimeout) * time.Second
 	opts.ReadTimeout = time.Duration(config.ReadTimeout) * time.Second
-	opts.ConnMaxLifetime = time.Duration(config.KeepAlivePeriod) * time.Second
-	opts.MaxOpenConns = config.MaxOpen
+	opts.KeepAlivePeriod = time.Duration(config.KeepAlivePeriod) * time.Second
+	opts.UseJSONNumber = config.UseJSONNumber
+	opts.NumRetries = config.NumRetries
+	opts.InitialCap = config.InitialCap
+	opts.MaxOpen = config.MaxOpen
+	opts.DiscoverHosts = config.DiscoverHosts
+	opts.HostDecayDuration = time.Duration(config.HostDecayDuration) * time.Second
 
-	a.conn, err = clickhouse.Open(&opts)
+	a.conn, err = rdb.Connect(opts)
 	if err != nil {
 		return err
 	}
 
+	rdb.SetTags("json")
 	a.version = -1
 
-	return a.conn.Ping(context.Background())
+	return nil
 }
 
 // Close closes the underlying database connection
@@ -143,23 +139,57 @@ func (a *adapter) Close() error {
 }
 
 // GetDbVersion returns current database version.
-func (a *adapter) CheckDbVersion() error {
-	return nil
-}
-
-func (a *adapter) CreateDb(reset bool) error {
-	return nil
-}
-
 func (a *adapter) GetDbVersion() (int, error) {
-	return -1, nil
+	if a.version > 0 {
+		return a.version, nil
+	}
+
+	cursor, err := rdb.DB(a.dbName).Table("kvmeta").Get("version").Field("value").Run(a.conn)
+	if err != nil {
+		if isMissingDb(err) {
+			err = errors.New("Database not initialized")
+		}
+		return -1, err
+	}
+	defer cursor.Close()
+
+	if cursor.IsNil() {
+		return -1, errors.New("Database not initialized")
+	}
+
+	var vers int
+	if err = cursor.One(&vers); err != nil {
+		return -1, err
+	}
+
+	a.version = vers
+
+	return vers, nil
 }
 
-func (a *adapter) GetName() string {
-	return adapterName
+// Stats returns DB connection stats object.
+func (a *adapter) Stats() interface{} {
+	if a.conn == nil {
+		return nil
+	}
+
+	cursor, err := rdb.DB("rethinkdb").Table("stats").Get([]string{"cluster"}).Field("query_engine").Run(a.conn)
+	if err != nil {
+		return nil
+	}
+	defer cursor.Close()
+
+	var stats []interface{}
+	if err = cursor.All(&stats); err != nil || len(stats) < 1 {
+		return nil
+	}
+
+	return stats[0]
 }
 
-// IsOpen checks if the adapter is ready for use
+
+// IsOpen returns true if connection to database has been established. It does not check if
+// connection is actually live.
 func (a *adapter) IsOpen() bool {
 	return a.conn != nil
 }
@@ -175,16 +205,23 @@ func (a *adapter) SetMaxResults(val int) error {
 	return nil
 }
 
-// Stats returns DB connection stats object.
-func (a *adapter) Stats() interface{} {
-	if a.conn == nil {
-		return nil
-	}
-
+// UpgradeDb upgrades the database to the latest version.
+func (a *adapter) UpgradeDb() error {
 	return nil
 }
 
-func (a *adapter) UpgradeDb() error {
+// CheckDbVersion checks whether the actual DB version matches the expected version of this adapter.
+func (a *adapter) CheckDbVersion() error {
+	version, err := a.GetDbVersion()
+	if err != nil {
+		return err
+	}
+
+	if version != adpVersion {
+		return errors.New("Invalid database version " + strconv.Itoa(version) +
+			". Expected " + strconv.Itoa(adpVersion))
+	}
+
 	return nil
 }
 
@@ -193,8 +230,35 @@ func (adapter) Version() int {
 	return adpVersion
 }
 
+// CreateDb initializes the storage. If reset is true, the database is first deleted losing all the data.
+func (a *adapter) CreateDb(reset bool) error {
+	// Drop database if exists, ignore error if it does not.
+	if reset {
+		rdb.DBDrop(a.dbName).RunWrite(a.conn)
+	}
+
+	if _, err := rdb.DBCreate(a.dbName).RunWrite(a.conn); err != nil {
+		return err
+	}
+
+	// Table with metadata key-value pairs.
+	if _, err := rdb.DB(a.dbName).TableCreate("kvmeta", rdb.TableCreateOpts{PrimaryKey: "key"}).RunWrite(a.conn); err != nil {
+		return err
+	}
+	// Record current DB version.
+	if _, err := rdb.DB(a.dbName).Table("kvmeta").Insert(
+		map[string]interface{}{"key": "version", "value": adpVersion}).RunWrite(a.conn); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (a *adapter) GetName() string {
+	return adapterName
+}
 // Save stores data into table in clickhouse database
-func (p *adapter) Save(rumEvent beacon.RumEvent) error {
+/*func (p *adapter) Save(rumEvent beacon.RumEvent) error {
 	jsonValue, err := json.Marshal(rumEvent)
 	if err != nil {
 		return fmt.Errorf("json[%+v] parsing error: %w", rumEvent, err)
@@ -202,7 +266,7 @@ func (p *adapter) Save(rumEvent beacon.RumEvent) error {
 	data := string(jsonValue)
 	query := fmt.Sprintf(
 		"INSERT INTO %s SETTINGS input_format_skip_unknown_fields = true FORMAT JSONEachRow %s",
-		p.prefix+baseTableName,
+		p.table,
 		data,
 	)
 	err = p.conn.AsyncInsert(context.Background(), query, false)
@@ -213,7 +277,7 @@ func (p *adapter) Save(rumEvent beacon.RumEvent) error {
 }
 
 // SaveHost stores hostname data into table in clickhouse database
-func (p *adapter) SaveHost(event beacon.HostnameEvent) error {
+func (p *DAO) SaveHost(event beacon.HostnameEvent) error {
 	data, err := json.Marshal(event)
 	if err != nil {
 		return err
@@ -232,7 +296,7 @@ func (p *adapter) SaveHost(event beacon.HostnameEvent) error {
 }
 
 // InsertOwnerHostname inserts a new hostname
-func (p *adapter) InsertOwnerHostname(item types.OwnerHostname) error {
+func (p *DAO) InsertOwnerHostname(item types.OwnerHostname) error {
 	query := fmt.Sprintf(
 		"INSERT INTO %s%s(username, hostname, subscription_id, subscription_expire_at) VALUES(?,?,?,?)",
 		p.prefix,
@@ -242,7 +306,7 @@ func (p *adapter) InsertOwnerHostname(item types.OwnerHostname) error {
 }
 
 // DeleteOwnerHostname deletes the hostname
-func (p *adapter) DeleteOwnerHostname(hostname, username string) error {
+func (p *DAO) DeleteOwnerHostname(hostname, username string) error {
 	query := fmt.Sprintf(
 		"DELETE FROM %s%s WHERE hostname = ? AND username = ?",
 		p.prefix,
@@ -252,7 +316,7 @@ func (p *adapter) DeleteOwnerHostname(hostname, username string) error {
 }
 
 // GetSubscriptions gets all subscriptions
-func (p *adapter) GetSubscriptions() (map[string]*types.SubscriptionWithHostname, error) {
+func (p *DAO) GetSubscriptions() (map[string]*types.SubscriptionWithHostname, error) {
 	query := fmt.Sprintf(
 		"SELECT subscription_id, subscription_expire_at, hostname FROM %v%v FINAL",
 		p.prefix,
@@ -308,7 +372,19 @@ func (p *adapter) GetSubscription(id string) (*types.SubscriptionWithHostname, e
 
 	return &result, nil
 }
+*/
 
 func init() {
 	store.RegisterAdapter(&adapter{})
+}
+
+// Checks if the given error is 'Database not found'.
+func isMissingDb(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := err.Error()
+	// "Database `db_name` does not exist"
+	return strings.Contains(msg, "Database `") && strings.Contains(msg, "` does not exist")
 }

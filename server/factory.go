@@ -2,13 +2,14 @@ package server
 
 import (
 	"crypto/tls"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 
 	"github.com/basicrum/front_basicrum_go/backup"
-	"github.com/basicrum/front_basicrum_go/config"
 	"github.com/basicrum/front_basicrum_go/service"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
@@ -18,6 +19,16 @@ const (
 	defaultHTTPPort  = "80"
 	defaultHTTPSPort = "443"
 	cacheDirPath     = "cache-dir"
+)
+
+// SSLType is the type of http SSL configuration to use
+type SSLType string
+
+const (
+	// SSLTypeFile file configuration
+	SSLTypeFile SSLType = "FILE"
+	// SSLTypeLetsEncrypt let's encrypt configuration
+	SSLTypeLetsEncrypt SSLType = "LETS_ENCRYPT"
 )
 
 // Factory is server factory
@@ -37,58 +48,78 @@ func NewFactory(
 	}
 }
 
-// Build creates http/https server(s) based on startup configuration
-func (f *Factory) Build(sConf config.StartupConfig) ([]*Server, error) {
-	httpPort := defaultValue(sConf.Server.Port, defaultHTTPPort)
-	httpsPort := defaultValue(sConf.Server.Port, defaultHTTPSPort)
+type configType struct {
+	Port            string  `json:"BRUM_SERVER_PORT"`
+	SSL             bool    `json:"BRUM_SERVER_SSL" default:"false"`
+	SSLType         SSLType `json:"BRUM_SERVER_SSL_TYPE" default:"FILE"`
+	SSLFileCertFile string  `json:"BRUM_SERVER_SSL_CERT_FILE"`
+	SSLFileKeyFile  string  `json:"BRUM_SERVER_SSL_KEY_FILE"`
+	Domain          string  `json:"BRUM_SERVER_SSL_LETS_ENCRYPT_DOMAIN"`
+	Token           string  `json:"BRUM_PRIVATE_API_TOKEN"`
+}
 
-	if !sConf.Server.SSL {
+// Build creates http/https server(s) based on startup configuration
+func (f *Factory) Build(jsonconfig json.RawMessage) ([]*Server, error) {
+
+	if len(jsonconfig) < 2 {
+		return nil, errors.New("server missing config")
+	}
+
+	var err error
+	var sConf configType
+	if err = json.Unmarshal(jsonconfig, &sConf); err != nil {
+		return nil, errors.New("server failed to parse config: " + err.Error())
+	}
+	httpPort := defaultValue(sConf.Port, defaultHTTPPort)
+	httpsPort := defaultValue(sConf.Port, defaultHTTPSPort)
+
+	if !sConf.SSL {
 		log.Println("HTTP configuration enabled")
 		httpServer := New(
 			f.processService,
 			f.backupService,
-			sConf.PrivateAPI.Token,
+			sConf.Token,
 			WithHTTP(httpPort),
 		)
 		return []*Server{httpServer}, nil
 	}
 
-	log.Printf("SSL configuration enabled type[%v]\n", sConf.Server.SSLType)
-	switch sConf.Server.SSLType {
-	case config.SSLTypeLetsEncrypt:
-		allowedHost := sConf.Server.SSLLetsEncrypt.Domain
+	log.Printf("SSL configuration enabled type[%v]\n", sConf.SSLType)
+	switch sConf.SSLType {
+	case SSLTypeLetsEncrypt:
+		allowedHost := sConf.Domain
 		log.Printf("SSL Let's Encrypt allowedHost[%v]\n", allowedHost)
 		tlsConfig := makeLetsEncryptTLSConfig(allowedHost)
 		httpsServer := New(
 			f.processService,
 			f.backupService,
-			sConf.PrivateAPI.Token,
+			sConf.Token,
 			WithTLSConfig(defaultHTTPSPort, tlsConfig),
 		)
 		httpServer := New(
 			f.processService,
 			f.backupService,
-			sConf.PrivateAPI.Token,
+			sConf.Token,
 			WithHTTP(httpPort),
 		)
 		return []*Server{httpsServer, httpServer}, nil
-	case config.SSLTypeFile:
+	case SSLTypeFile:
 		log.Println("SSL files configuration enabled")
 		httpsServer := New(
 			f.processService,
 			f.backupService,
-			sConf.PrivateAPI.Token,
-			WithSSL(httpsPort, sConf.Server.SSLFile.SSLFileCertFile, sConf.Server.SSLFile.SSLFileKeyFile),
+			sConf.Token,
+			WithSSL(httpsPort, sConf.SSLFileCertFile, sConf.SSLFileKeyFile),
 		)
 		httpServer := New(
 			f.processService,
 			f.backupService,
-			sConf.PrivateAPI.Token,
+			sConf.Token,
 			WithHTTP(httpPort),
 		)
 		return []*Server{httpsServer, httpServer}, nil
 	default:
-		return nil, fmt.Errorf("unsupported SSL type[%v]", sConf.Server.SSLType)
+		return nil, fmt.Errorf("unsupported SSL type[%v]", sConf.SSLType)
 	}
 }
 

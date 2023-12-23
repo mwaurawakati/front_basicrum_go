@@ -5,12 +5,16 @@ go 1.21
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.10.1
 	github.com/eapache/go-resiliency v1.3.1-0.20230202171514-83b926b9feca
+	github.com/go-sql-driver/mysql v1.7.1
 	github.com/golang/mock v1.3.1
+	github.com/jmoiron/sqlx v1.3.5
 	github.com/martinlindhe/base36 v1.1.1
 	github.com/mileusna/useragent v1.3.3
+	github.com/redis/go-redis/v9 v9.3.1
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/rs/cors v1.9.0
 	github.com/stretchr/testify v1.8.4
+	github.com/tinode/jsonco v1.0.0
 	github.com/ua-parser/uap-go v0.0.0-20211112212520-00c877edfe0f
 	github.com/uptrace/go-clickhouse v0.3.1
 	github.com/uptrace/go-clickhouse/chdebug v0.3.1
@@ -20,7 +24,9 @@ require (
 )
 
 require (
+	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/codemodus/kace v0.5.1 // indirect
+	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/fatih/color v1.15.0 // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/hailocab/go-hostpool v0.0.0-20160125115350-e80d13ce29ed // indirect

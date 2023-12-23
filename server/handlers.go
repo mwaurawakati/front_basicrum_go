@@ -19,6 +19,7 @@ const (
 )
 
 func (s *Server) catcher(w http.ResponseWriter, r *http.Request) {
+	log.Println("Catcher called")
 	// return no cache headers
 	s.responseNoContent(w)
 
@@ -208,12 +209,12 @@ func (*Server) headersNoCache(w http.ResponseWriter, statusCode int) {
 	w.WriteHeader(statusCode)
 }
 
-//  Access middleware
+// Access middleware
 func AccessMiddleWare(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request){
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		//check for authetication
 
-		h.ServeHTTP(w,r)
+		h.ServeHTTP(w, r)
 
 	})
 }

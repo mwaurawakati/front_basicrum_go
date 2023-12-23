@@ -8,12 +8,12 @@ import (
 
 // SubscriptionService creates in-memory cache service
 type SubscriptionService struct {
-	dao   dao.IDAO
+	dao   dao.Adapter
 	cache map[string]*types.SubscriptionWithHostname
 }
 
 // New creates caching subscription service
-func New(daoService dao.IDAO) *SubscriptionService {
+func New(daoService dao.Adapter) *SubscriptionService {
 	return &SubscriptionService{
 		dao:   daoService,
 		cache: make(map[string]*types.SubscriptionWithHostname),

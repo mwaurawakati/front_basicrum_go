@@ -29,7 +29,7 @@ type IService interface {
 // Service processes events and stores them in database access object
 type Service struct {
 	rumEventFactory     IRumEventFactory
-	daoService          dao.IDAO
+	daoService          dao.Adapter
 	events              chan *types.Event
 	hosts               map[string]string
 	subscriptionService ISubscriptionService
@@ -40,7 +40,7 @@ type Service struct {
 // nolint: revive
 func New(
 	rumEventFactory IRumEventFactory,
-	daoService dao.IDAO,
+	daoService dao.Adapter,
 	subscriptionService ISubscriptionService,
 	backupService backup.IBackup,
 ) *Service {
@@ -62,7 +62,6 @@ func (s *Service) SaveAsync(event *types.Event) {
 	}()
 }
 
-// 
 func GetData() {
 
 }

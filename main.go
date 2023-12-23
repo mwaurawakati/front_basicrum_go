@@ -5,46 +5,168 @@ package main
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
+	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/basicrum/front_basicrum_go/backup"
 	"github.com/basicrum/front_basicrum_go/config"
-	"github.com/basicrum/front_basicrum_go/dao"
+	_ "github.com/basicrum/front_basicrum_go/dao/clickhouse"
+	_ "github.com/basicrum/front_basicrum_go/dao/redis"
+	_ "github.com/basicrum/front_basicrum_go/dao/rethinkdb"
+
 	"github.com/basicrum/front_basicrum_go/geoip"
 	"github.com/basicrum/front_basicrum_go/geoip/cloudflare"
 	"github.com/basicrum/front_basicrum_go/geoip/maxmind"
+	"github.com/basicrum/front_basicrum_go/logs"
 	"github.com/basicrum/front_basicrum_go/server"
 	"github.com/basicrum/front_basicrum_go/service"
 	"github.com/basicrum/front_basicrum_go/service/subscription/caching"
 	"github.com/basicrum/front_basicrum_go/service/subscription/disabled"
+	"github.com/basicrum/front_basicrum_go/store"
+
 	"github.com/ua-parser/uap-go/uaparser"
 	"golang.org/x/sync/errgroup"
+
+	// For stripping comments from JSON config
+	jcr "github.com/tinode/jsonco"
 )
 
 //go:embed assets/uaparser_regexes.yaml
 var userAgentRegularExpressions []byte
 
+// Contentx of the configuration file
+
+type Backup struct {
+	Enabled          bool   `json:"BRUM_BACKUP_ENABLED,omitempty"`
+	Directory        string `json:"BRUM_BACKUP_DIRECTORY,omitempty"`
+	IntervalSeconds  uint32 `json:"BRUM_BACKUP_INTERVAL_SECONDS,omitempty"`
+	CompressionType  string `json:"BRUM_COMPRESSION_TYPE,omitempty"`
+	CompressionLevel string `json:"BRUM_COMPRESSION_LEVEL,omitempty"`
+}
+
+type Subscription struct {
+	Enabled bool `json:"BRUM_SUBSCRIPTION_ENABLED"`
+}
+type configType struct {
+	Store        json.RawMessage `json:"store_config"`
+	Backup       `json:"backup"`
+	Subscription `json:"subsription"`
+	Server       json.RawMessage `json:"server"`
+}
+
 // nolint: revive
 func main() {
-	sConf, err := config.GetStartupConfig()
+	logFlags := flag.String("log_flags", "stdFlags",
+		"Comma-separated list of log flags (as defined in https://golang.org/pkg/log/#pkg-constants without the L prefix)")
+	configfile := flag.String("config", "front_basicrum_go.conf", "Path to config file.")
+	reset := flag.Bool("reset", false, "force database reset")
+	upgrade := flag.Bool("upgrade", false, "perform database version upgrade")
+	noInit := flag.Bool("no_init", false, "check that database exists but don't create if missing")
+	flag.Parse()
+	logs.Init(os.Stderr, *logFlags)
+	curwd, err := os.Getwd()
+	if err != nil {
+		logs.Err.Fatal("Couldn't get current working directory: ", err)
+	}
+	*configfile = toAbsolutePath(curwd, *configfile)
+	logs.Info.Printf("Using config from '%s'", *configfile)
+
+	_, err = config.GetStartupConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	var config configType
+	if file, err := os.Open(*configfile); err != nil {
+		logs.Err.Fatal("Failed to read config file: ", err)
+	} else {
+		jr := jcr.New(file)
+		if err = json.NewDecoder(jr).Decode(&config); err != nil {
+			switch jerr := err.(type) {
+			case *json.UnmarshalTypeError:
+				lnum, cnum, _ := jr.LineAndChar(jerr.Offset)
+				logs.Err.Fatalf("Unmarshall error in config file in %s at %d:%d (offset %d bytes): %s",
+					jerr.Field, lnum, cnum, jerr.Offset, jerr.Error())
+			case *json.SyntaxError:
+				lnum, cnum, _ := jr.LineAndChar(jerr.Offset)
+				logs.Err.Fatalf("Syntax error in config file at %d:%d (offset %d bytes): %s",
+					lnum, cnum, jerr.Offset, jerr.Error())
+			default:
+				logs.Err.Fatal("Failed to parse config file: ", err)
+			}
+		}
+		file.Close()
+	}
+	err = store.Store.Open(1, config.Store)
+	defer store.Store.Close()
+	adapterVersion := store.Store.GetAdapterVersion()
+	databaseVersion := 0
+	if store.Store.IsOpen() {
+		databaseVersion = store.Store.GetDbVersion()
+	}
+	if err != nil {
+		if strings.Contains(err.Error(), "Database not initialized") {
+			if *noInit {
+				log.Fatalln("Database not found.")
+			}
+			log.Println("Database not found. Creating.")
+			err = store.Store.InitDb(config.Store, false)
+			if err == nil {
+				log.Println("Database successfully created.")
+				//created = true
+			}
+		} else if strings.Contains(err.Error(), "Invalid database version") {
+			msg := "Wrong DB version: expected " + strconv.Itoa(adapterVersion) + ", got " +
+				strconv.Itoa(databaseVersion) + "."
+
+			if *reset {
+				log.Println(msg, "Reset Requested. Dropping and recreating the database.")
+				err = store.Store.InitDb(config.Store, true)
+				if err == nil {
+					log.Println("Database successfully reset.")
+				}
+			} else if *upgrade {
+				if databaseVersion > adapterVersion {
+					log.Fatalln(msg, "Unable to upgrade: database has greater version than the adapter.")
+				}
+				log.Println(msg, "Upgrading the database.")
+				err = store.Store.UpgradeDb(config.Store)
+				if err == nil {
+					log.Println("Database successfully upgraded.")
+				}
+			} else {
+				log.Fatalln(msg, "Use --reset to reset, --upgrade to upgrade.")
+			}
+		} else {
+			log.Fatalln("Failed to init DB adapter:", err)
+		}
+	} else if *reset {
+		log.Println("Reset requested. Dropping and recreating the database.")
+		err = store.Store.InitDb(config.Store, true)
+		if err == nil {
+			log.Println("Database successfully reset.")
+		}
+	} else {
+		log.Println("Database exists, version is correct.")
+	}
+	stats := store.Store.DbStats()
+	fmt.Println(stats())
 	// We need to get the Regexes from here: https://github.com/ua-parser/uap-core/blob/master/regexes.yaml
 	userAgentParser, err := uaparser.NewFromBytes(userAgentRegularExpressions)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	daoServer := dao.Server(sConf.Database.Host, sConf.Database.Port, sConf.Database.DatabaseName)
-	daoAuth := dao.Auth(sConf.Database.Username, sConf.Database.Password)
-
-	conn, err := dao.NewConnection(
+	/*conn, err := dao.NewConnection(
 		daoServer,
 		daoAuth,
 	)
@@ -66,21 +188,21 @@ func main() {
 	err = migrateDaoService.Migrate()
 	if err != nil {
 		log.Fatalf("migrate database ERROR: %+v", err)
-	}
+	}*/
 
 	geopIPService := geoip.NewComposite(
 		cloudflare.New(),
 		maxmind.New(),
 	)
 
-	compressionFactory := backup.NewCompressionWriterFactory(sConf.Backup.Enabled, backup.Compression(sConf.Backup.CompressionType), backup.CompressionLevel(sConf.Backup.CompressionLevel))
-	backupInterval := time.Duration(sConf.Backup.IntervalSeconds) * time.Second
-	backupService, err := backup.New(sConf.Backup.Enabled, backupInterval, sConf.Backup.Directory, compressionFactory)
+	compressionFactory := backup.NewCompressionWriterFactory(config.Backup.Enabled, backup.Compression(config.Backup.CompressionType), backup.CompressionLevel(config.Backup.CompressionLevel))
+	backupInterval := time.Duration(config.Backup.IntervalSeconds) * time.Second
+	backupService, err := backup.New(config.Backup.Enabled, backupInterval, config.Backup.Directory, compressionFactory)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	subscriptionService := makeSubscriptionService(sConf, daoService)
+	subscriptionService := makeSubscriptionService(&config)
 	err = subscriptionService.Load()
 	if err != nil {
 		log.Fatal(err)
@@ -88,12 +210,12 @@ func main() {
 	rumEventFactory := service.NewRumEventFactory(userAgentParser, geopIPService)
 	processingService := service.New(
 		rumEventFactory,
-		daoService,
+		store.Store.GetAdapter(),
 		subscriptionService,
 		backupService,
 	)
 	serverFactory := server.NewFactory(processingService, backupService)
-	servers, err := serverFactory.Build(*sConf)
+	servers, err := serverFactory.Build(config.Server)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -106,11 +228,11 @@ func main() {
 	log.Print("Servers exited properly")
 }
 
-func makeSubscriptionService(conf *config.StartupConfig, daoService *dao.DAO) service.ISubscriptionService {
+func makeSubscriptionService(conf *configType) service.ISubscriptionService {
 	if !conf.Subscription.Enabled {
 		return disabled.New()
 	}
-	return caching.New(daoService)
+	return caching.New(store.Store.GetAdapter())
 }
 
 func startServers(servers []*server.Server) {
@@ -158,4 +280,12 @@ func stopServers(servers []*server.Server, backupService backup.IBackup) error {
 
 	// wait for all parallel jobs to finish
 	return g.Wait()
+}
+
+// Convert relative filepath to absolute.
+func toAbsolutePath(base, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Clean(filepath.Join(base, path))
 }
