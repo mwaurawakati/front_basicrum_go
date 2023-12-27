@@ -1,7 +1,7 @@
 package beacon
 
 import (
-	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -44,7 +44,7 @@ func DecompressBucketLog(data string) []uint64 {
 	i := 0
 
 	for i < logDataLen {
-		fmt.Println("Scanning: " + strconv.Itoa(i))
+		slog.Info("Scanning: " + strconv.Itoa(i))
 		if string(logData[i]) == "*" {
 			// this is a repeating number
 
@@ -112,7 +112,7 @@ func DecompressBucketLog(data string) []uint64 {
 			}
 		}
 
-		fmt.Println(num)
+		slog.Info("", "num", num)
 
 		out = append(out, num)
 
@@ -140,7 +140,7 @@ func decompressBucketLogNumber(input string) uint64 {
 	// convert to ASCII character codeDecompressBucketLog
 	chr := uint64([]byte(input)[0])
 
-	fmt.Println(input)
+	slog.Info(input)
 
 	if chr >= 48 && chr <= 57 {
 		// 0 - 9

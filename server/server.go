@@ -4,7 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -83,10 +84,10 @@ func (s *Server) Serve() error {
 		TLSConfig:         s.tlsConfig,
 	}
 	if s.certFile != "" || s.keyFile != "" || s.tlsConfig != nil {
-		log.Printf("starting https server on port[%v] with certFile[%v] keyFile[%v]", s.port, s.certFile, s.keyFile)
+		slog.Info(fmt.Sprintf("starting https server on port[%v] with certFile[%v] keyFile[%v]", s.port, s.certFile, s.keyFile))
 		return s.server.ListenAndServeTLS(s.certFile, s.keyFile)
 	}
-	log.Printf("starting http server on port[%v]", s.port)
+	slog.Info(fmt.Sprintf("starting http server on port[%v]", s.port))
 	return s.server.ListenAndServe()
 }
 

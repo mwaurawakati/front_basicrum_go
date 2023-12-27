@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/basicrum/front_basicrum_go/beacon"
 	"github.com/basicrum/front_basicrum_go/store"
+	"github.com/basicrum/front_basicrum_go/types"
 	rdb "gopkg.in/rethinkdb/rethinkdb-go.v6"
 )
 
@@ -22,17 +24,26 @@ type adapter struct {
 	// Maximum number of records to return
 	maxResults int
 	version    int
+	prefix     string
 }
 
 const (
 	defaultHost     = "localhost:28015"
-	defaultDatabase = "default"
+	defaultDatabase = "rum"
 
-	adpVersion = 113
+	adpVersion = 1
 
 	adapterName = "rethinkdb"
 
 	defaultMaxResults = 1024
+)
+
+const (
+	baseTableName           = "webperf_rum_events"
+	baseHostsTableName      = "webperf_rum_hostnames"
+	baseOwnerHostsTableName = "webperf_rum_own_hostnames"
+	tablePrefixPlaceholder  = "{prefix}"
+	bufferSize              = 1024
 )
 
 // See https://godoc.org/github.com/rethinkdb/rethinkdb-go#ConnectOpts for explanations.
@@ -146,7 +157,7 @@ func (a *adapter) GetDbVersion() (int, error) {
 
 	cursor, err := rdb.DB(a.dbName).Table("kvmeta").Get("version").Field("value").Run(a.conn)
 	if err != nil {
-		if isMissingDb(err) {
+		if isMissingDb(err) || isMissingTable(err) {
 			err = errors.New("Database not initialized")
 		}
 		return -1, err
@@ -159,6 +170,7 @@ func (a *adapter) GetDbVersion() (int, error) {
 
 	var vers int
 	if err = cursor.One(&vers); err != nil {
+
 		return -1, err
 	}
 
@@ -187,7 +199,6 @@ func (a *adapter) Stats() interface{} {
 	return stats[0]
 }
 
-
 // IsOpen returns true if connection to database has been established. It does not check if
 // connection is actually live.
 func (a *adapter) IsOpen() bool {
@@ -207,6 +218,7 @@ func (a *adapter) SetMaxResults(val int) error {
 
 // UpgradeDb upgrades the database to the latest version.
 func (a *adapter) UpgradeDb() error {
+	//TODO:Implement this method if needed.
 	return nil
 }
 
@@ -241,6 +253,19 @@ func (a *adapter) CreateDb(reset bool) error {
 		return err
 	}
 
+	if _, err := rdb.DB(a.dbName).TableCreate("latency", rdb.TableCreateOpts{PrimaryKey: "Id"}).RunWrite(a.conn); err != nil {
+		return err
+	}
+
+	if _, err := rdb.DB(a.dbName).TableCreate(a.prefix+"webperf_rum_hostnames", rdb.TableCreateOpts{PrimaryKey: "hostname"}).RunWrite(a.conn); err != nil {
+		return err
+	}
+	if _, err := rdb.DB(a.dbName).TableCreate(a.prefix+"webperf_rum_own_hostnames", rdb.TableCreateOpts{PrimaryKey: "hostname"}).RunWrite(a.conn); err != nil {
+		return err
+	}
+	if _, err := rdb.DB(a.dbName).TableCreate(a.prefix+"webperf_rum_grant_hostnames", rdb.TableCreateOpts{PrimaryKey: "hostname"}).RunWrite(a.conn); err != nil {
+		return err
+	}
 	// Table with metadata key-value pairs.
 	if _, err := rdb.DB(a.dbName).TableCreate("kvmeta", rdb.TableCreateOpts{PrimaryKey: "key"}).RunWrite(a.conn); err != nil {
 		return err
@@ -257,122 +282,80 @@ func (a *adapter) CreateDb(reset bool) error {
 func (a *adapter) GetName() string {
 	return adapterName
 }
+
 // Save stores data into table in clickhouse database
-/*func (p *adapter) Save(rumEvent beacon.RumEvent) error {
-	jsonValue, err := json.Marshal(rumEvent)
+func (a *adapter) Save(rumEvent beacon.RumEvent) error {
+	_, err := rdb.DB(a.dbName).Table("latency").Insert(rumEvent).RunWrite(a.conn)
 	if err != nil {
-		return fmt.Errorf("json[%+v] parsing error: %w", rumEvent, err)
-	}
-	data := string(jsonValue)
-	query := fmt.Sprintf(
-		"INSERT INTO %s SETTINGS input_format_skip_unknown_fields = true FORMAT JSONEachRow %s",
-		p.table,
-		data,
-	)
-	err = p.conn.AsyncInsert(context.Background(), query, false)
-	if err != nil {
-		return fmt.Errorf("clickhouse insert failed: %w", err)
+		return err
 	}
 	return nil
 }
 
 // SaveHost stores hostname data into table in clickhouse database
-func (p *DAO) SaveHost(event beacon.HostnameEvent) error {
-	data, err := json.Marshal(event)
+func (a *adapter) SaveHost(event beacon.HostnameEvent) error {
+	_, err := rdb.DB(a.dbName).Table(a.prefix + baseHostsTableName).Insert(event).RunWrite(a.conn)
 	if err != nil {
 		return err
-	}
-	query := fmt.Sprintf(
-		"INSERT INTO %s%s SETTINGS input_format_skip_unknown_fields = true FORMAT JSONEachRow %s",
-		p.prefix,
-		baseHostsTableName,
-		data,
-	)
-	err = p.conn.AsyncInsert(context.Background(), query, false)
-	if err != nil {
-		return fmt.Errorf("clickhouse insert failed: %w", err)
 	}
 	return nil
 }
 
 // InsertOwnerHostname inserts a new hostname
-func (p *DAO) InsertOwnerHostname(item types.OwnerHostname) error {
-	query := fmt.Sprintf(
-		"INSERT INTO %s%s(username, hostname, subscription_id, subscription_expire_at) VALUES(?,?,?,?)",
-		p.prefix,
-		baseOwnerHostsTableName,
-	)
-	return p.conn.Exec(context.Background(), query, item.Username, item.Hostname, item.Subscription.ID, item.Subscription.ExpiresAt)
+func (a *adapter) InsertOwnerHostname(item types.OwnerHostname) error {
+	_, err := rdb.DB(a.dbName).Table(a.prefix + baseOwnerHostsTableName).Insert(item).RunWrite(a.conn)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // DeleteOwnerHostname deletes the hostname
-func (p *DAO) DeleteOwnerHostname(hostname, username string) error {
-	query := fmt.Sprintf(
-		"DELETE FROM %s%s WHERE hostname = ? AND username = ?",
-		p.prefix,
-		baseOwnerHostsTableName,
-	)
-	return p.conn.Exec(context.Background(), query, hostname, username)
+func (a *adapter) DeleteOwnerHostname(hostname, username string) error {
+	_, err := rdb.DB(a.dbName).Table(a.prefix+baseOwnerHostsTableName).
+		GetAllByIndex("username", username).
+		Filter(map[string]interface{}{"hostname": hostname}).
+		Delete().RunWrite(a.conn)
+	return err
 }
 
 // GetSubscriptions gets all subscriptions
-func (p *DAO) GetSubscriptions() (map[string]*types.SubscriptionWithHostname, error) {
-	query := fmt.Sprintf(
-		"SELECT subscription_id, subscription_expire_at, hostname FROM %v%v FINAL",
-		p.prefix,
-		baseOwnerHostsTableName,
-	)
-	rows, err := p.conn.Query(context.Background(), query)
-	if err != nil {
-		return nil, fmt.Errorf("get subscriptions failed: %w", err)
-	}
-	defer rows.Close()
-
+func (a *adapter) GetSubscriptions() (map[string]*types.SubscriptionWithHostname, error) {
 	result := make(map[string]*types.SubscriptionWithHostname)
-	for rows.Next() {
+	if cursor, err := rdb.DB(a.dbName).Table(a.prefix + baseOwnerHostsTableName).Run(a.conn); err == nil {
+		defer cursor.Close()
 		var item types.SubscriptionWithHostname
-		if err := rows.Scan(&item.Subscription.ID, &item.Subscription.ExpiresAt, &item.Hostname); err != nil {
-			return result, err
+		for cursor.Next(&item) {
+			result[item.Subscription.ID] = &item
 		}
-		result[item.Subscription.ID] = &item
-	}
 
-	if err = rows.Err(); err != nil {
-		return result, err
+		if err = cursor.Err(); err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, err
 	}
 	return result, nil
 }
 
 // GetSubscription gets subscription by id
-func (p *adapter) GetSubscription(id string) (*types.SubscriptionWithHostname, error) {
-	query := fmt.Sprintf(`
-	SELECT subscription_id, subscription_expire_at, hostname
-	FROM %v%v FINAL
-	WHERE subscription_id = ?
-	`,
-		p.prefix,
-		baseOwnerHostsTableName,
-	)
-	rows, err := p.conn.Query(context.Background(), query, id)
+func (a *adapter) GetSubscription(id string) (*types.SubscriptionWithHostname, error) {
+	cursor, err := rdb.DB(a.dbName).Table(a.prefix + baseOwnerHostsTableName).GetAll(id).Run(a.conn)
 	if err != nil {
-		return nil, fmt.Errorf("get subscription failed: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
+	defer cursor.Close()
 
-	if !rows.Next() {
-		// nolint: nilnil
+	if cursor.IsNil() {
 		return nil, nil
 	}
 
 	var result types.SubscriptionWithHostname
-	err = rows.Scan(&result.Subscription.ID, &result.Subscription.ExpiresAt, &result.Hostname)
-	if err != nil {
-		return nil, fmt.Errorf("get subscription failed: %w", err)
+	if err = cursor.One(&result); err != nil {
+		return nil, err
 	}
-
 	return &result, nil
 }
-*/
 
 func init() {
 	store.RegisterAdapter(&adapter{})
@@ -387,4 +370,44 @@ func isMissingDb(err error) bool {
 	msg := err.Error()
 	// "Database `db_name` does not exist"
 	return strings.Contains(msg, "Database `") && strings.Contains(msg, "` does not exist")
+}
+
+func isMissingTable(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := err.Error()
+	// "Database `db_name` does not exist"
+	return strings.Contains(msg, "Table `") && strings.Contains(msg, "` does not exist")
+}
+
+// Get event record returns a record of events
+func (a *adapter) GetEvents() (any, error) {
+	var subs []any
+	if cursor, err := rdb.DB(a.dbName).Table("latency").Run(a.conn); err == nil {
+		defer cursor.Close()
+
+		var sub struct {
+			ID         string `json:"id"`
+			Cdir       string `json:"cdir"`
+			ServerID   any    `json:"server_id"`
+			Ans        int64  `json:"ans"`
+			Up         int64  `json:"up"`
+			StatusCode int64  `json:"status_code"`
+			Created_At string `json:"created_at"`
+			Latency    int    `json:"latency"`
+			Country    string `json:"country"	`
+		}
+		for cursor.Next(&sub) {
+			subs = append(subs, sub)
+		}
+
+		if err = cursor.Err(); err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, err
+	}
+	return subs, nil
 }

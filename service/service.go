@@ -3,7 +3,8 @@ package service
 //go:generate mockgen -source=${GOFILE} -destination=mocks/${GOFILE} -package=servicemocks
 
 import (
-	"log"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/basicrum/front_basicrum_go/backup"
@@ -24,6 +25,8 @@ type IService interface {
 	RegisterHostname(hostname, username string) error
 	// DeleteHostname deletes the hostname
 	DeleteHostname(hostname, username string) error
+	//GetData retruns the event data
+	GetData() any
 }
 
 // Service processes events and stores them in database access object
@@ -62,8 +65,13 @@ func (s *Service) SaveAsync(event *types.Event) {
 	}()
 }
 
-func GetData() {
-
+func (s *Service) GetData() any {
+	d, err := s.daoService.GetEvents()
+	if err != nil {
+		slog.Error(err.Error())
+		return []any{}
+	}
+	return d
 }
 
 // Run process the events from the channel and save them in datastore (click house)
@@ -98,7 +106,7 @@ func (s *Service) processEvent(event *types.Event) {
 	rumEvent := s.rumEventFactory.Create(event)
 	lookup, err := s.subscriptionService.GetSubscription(rumEvent.SubscriptionID, rumEvent.Hostname)
 	if err != nil {
-		log.Printf("get subscription error: %+v", err)
+		slog.Error(fmt.Sprintf("get subscription error: %+v", err))
 		return
 	}
 
@@ -110,7 +118,7 @@ func (s *Service) processEvent(event *types.Event) {
 	case NotFoundLookup:
 		s.backupService.SaveUnknown(event)
 	default:
-		log.Printf("unsupported lookup result: %s", lookup)
+		slog.Error(fmt.Sprintf("unsupported lookup result: %s", lookup))
 		return
 	}
 }
@@ -118,7 +126,7 @@ func (s *Service) processEvent(event *types.Event) {
 func (s *Service) processRumEvent(rumEvent beacon.RumEvent) {
 	err := s.daoService.Save(rumEvent)
 	if err != nil {
-		log.Printf("failed to save data: %+v err: %+v", rumEvent, err)
+		slog.Error(fmt.Sprintf("failed to save data: %+v err: %+v", rumEvent, err))
 	}
 	s.hosts[rumEvent.Hostname] = rumEvent.Created_At
 }
@@ -134,7 +142,7 @@ func (s *Service) saveHost(hostname string, createdAt string) {
 	event := beacon.NewHostnameEvent(hostname, createdAt)
 	err := s.daoService.SaveHost(event)
 	if err != nil {
-		log.Printf("failed to save host: %+v err: %v", event, err)
+		slog.Error(fmt.Sprintf("failed to save host: %+v err: %v", event, err))
 	}
 }
 

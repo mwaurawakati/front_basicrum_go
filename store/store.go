@@ -4,6 +4,7 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 
 	"github.com/basicrum/front_basicrum_go/beacon"
 	adapter "github.com/basicrum/front_basicrum_go/dao"
@@ -44,7 +45,7 @@ func openAdapter(workerId int, jsonconf json.RawMessage) error {
 				adp = v
 			}
 		} else {
-			return errors.New("store: db adapter is not specified. Please set `store_config.use_adapter` in `tinode.conf`")
+			return errors.New("store: db adapter is not specified. Please set `store_config.use_adapter` in `front_basicrum_config.conf`")
 		}
 	}
 
@@ -144,7 +145,10 @@ func (storeObj) GetAdapterVersion() int {
 // GetDbVersion returns version of the underlying database.
 func (storeObj) GetDbVersion() int {
 	if adp != nil {
-		vers, _ := adp.GetDbVersion()
+		vers, err := adp.GetDbVersion()
+		if err != nil {
+			slog.Error(err.Error())
+		}
 		return vers
 	}
 

@@ -35,10 +35,18 @@ type Adapter interface {
 	Version() int
 	// DB connection stats object.
 	Stats() interface{}
+	// Save adds event to database
 	Save(rumEvent beacon.RumEvent) error
+	// SaveHost adds host to database
 	SaveHost(event beacon.HostnameEvent) error
+	// InsertOwnerHostname inserts a new owner hostname into database
 	InsertOwnerHostname(item types.OwnerHostname) error
+	// DeleteOwnerHostname deletes the owner hostname from database
 	DeleteOwnerHostname(hostname, username string) error
+	// GetSubscriptions gets all subscriptions from database
 	GetSubscriptions() (map[string]*types.SubscriptionWithHostname, error)
+	// GetSubscription gets a subscription from database
 	GetSubscription(id string) (*types.SubscriptionWithHostname, error)
+	// GetEvents gets a list of events from database
+	GetEvents() (any, error)
 }

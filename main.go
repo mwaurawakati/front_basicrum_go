@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,15 +18,14 @@ import (
 	"time"
 
 	"github.com/basicrum/front_basicrum_go/backup"
-	"github.com/basicrum/front_basicrum_go/config"
 	_ "github.com/basicrum/front_basicrum_go/dao/clickhouse"
+	_ "github.com/basicrum/front_basicrum_go/dao/mysql"
 	_ "github.com/basicrum/front_basicrum_go/dao/redis"
 	_ "github.com/basicrum/front_basicrum_go/dao/rethinkdb"
 
 	"github.com/basicrum/front_basicrum_go/geoip"
 	"github.com/basicrum/front_basicrum_go/geoip/cloudflare"
 	"github.com/basicrum/front_basicrum_go/geoip/maxmind"
-	"github.com/basicrum/front_basicrum_go/logs"
 	"github.com/basicrum/front_basicrum_go/server"
 	"github.com/basicrum/front_basicrum_go/service"
 	"github.com/basicrum/front_basicrum_go/service/subscription/caching"
@@ -65,47 +64,57 @@ type configType struct {
 
 // nolint: revive
 func main() {
-	logFlags := flag.String("log_flags", "stdFlags",
-		"Comma-separated list of log flags (as defined in https://golang.org/pkg/log/#pkg-constants without the L prefix)")
+	// configuration file
 	configfile := flag.String("config", "front_basicrum_go.conf", "Path to config file.")
+	// reset the database. Empty all the tables
 	reset := flag.Bool("reset", false, "force database reset")
+	// needed if there exists several database versions and an upgrade is needed
 	upgrade := flag.Bool("upgrade", false, "perform database version upgrade")
-	noInit := flag.Bool("no_init", false, "check that database exists but don't create if missing")
+	// necessary to check whether the database is initiallized(created)
+	noInit := flag.Bool("no_init", true, "check that database exists but don't create if missing")
 	flag.Parse()
-	logs.Init(os.Stderr, *logFlags)
+	slog.Info("Using database flags as:", "reset", *reset, "upgrade", *upgrade, "no init", *noInit)
 	curwd, err := os.Getwd()
 	if err != nil {
-		logs.Err.Fatal("Couldn't get current working directory: ", err)
+		slog.Error("Couldn't get current working directory: ", "error", err)
+		os.Exit(1)
 	}
 	*configfile = toAbsolutePath(curwd, *configfile)
-	logs.Info.Printf("Using config from '%s'", *configfile)
-
-	_, err = config.GetStartupConfig()
-	if err != nil {
-		log.Fatal(err)
-	}
+	slog.Info(fmt.Sprintf("Using config from '%s'", *configfile))
 
 	var config configType
+
+	// proccess config file
 	if file, err := os.Open(*configfile); err != nil {
-		logs.Err.Fatal("Failed to read config file: ", err)
+		slog.Error("Failed to read config file: ", err)
+		os.Exit(1)
 	} else {
 		jr := jcr.New(file)
 		if err = json.NewDecoder(jr).Decode(&config); err != nil {
 			switch jerr := err.(type) {
 			case *json.UnmarshalTypeError:
 				lnum, cnum, _ := jr.LineAndChar(jerr.Offset)
-				logs.Err.Fatalf("Unmarshall error in config file in %s at %d:%d (offset %d bytes): %s",
-					jerr.Field, lnum, cnum, jerr.Offset, jerr.Error())
+				slog.Error(fmt.Sprintf("Unmarshall error in config file in %s at %d:%d (offset %d bytes): %s",
+					jerr.Field, lnum, cnum, jerr.Offset, jerr.Error()))
+				os.Exit(1)
 			case *json.SyntaxError:
 				lnum, cnum, _ := jr.LineAndChar(jerr.Offset)
-				logs.Err.Fatalf("Syntax error in config file at %d:%d (offset %d bytes): %s",
-					lnum, cnum, jerr.Offset, jerr.Error())
+				slog.Error(fmt.Sprintf("Syntax error in config file at %d:%d (offset %d bytes): %s",
+					lnum, cnum, jerr.Offset, jerr.Error()))
+				os.Exit(1)
 			default:
-				logs.Err.Fatal("Failed to parse config file: ", err)
+				slog.Error("Failed to parse config file: ", "error", err)
+				os.Exit(1)
 			}
 		}
 		file.Close()
 	}
+	/*err1:=store.Store.InitDb(config.Store, true)
+	if err1 != nil{
+		slog.Error(err1.Error())
+	}*/
+	//vs:= store.Store.GetDbVersion()
+	//slog.Info("", "DATABASE VERSION", vs)
 	err = store.Store.Open(1, config.Store)
 	defer store.Store.Close()
 	adapterVersion := store.Store.GetAdapterVersion()
@@ -116,54 +125,63 @@ func main() {
 	if err != nil {
 		if strings.Contains(err.Error(), "Database not initialized") {
 			if *noInit {
-				log.Fatalln("Database not found.")
+				slog.Error("Database not found.")
+				os.Exit(1)
 			}
-			log.Println("Database not found. Creating.")
-			err = store.Store.InitDb(config.Store, false)
+			slog.Info("Database not found. Creating.")
+			err = store.Store.InitDb(config.Store, true)
 			if err == nil {
-				log.Println("Database successfully created.")
+				slog.Info("Database successfully created.")
 				//created = true
+			} else {
+				slog.Warn("Database failed to initialize", "error", err)
 			}
 		} else if strings.Contains(err.Error(), "Invalid database version") {
 			msg := "Wrong DB version: expected " + strconv.Itoa(adapterVersion) + ", got " +
 				strconv.Itoa(databaseVersion) + "."
 
 			if *reset {
-				log.Println(msg, "Reset Requested. Dropping and recreating the database.")
+				slog.Info(msg, "", "Reset Requested. Dropping and recreating the database.")
 				err = store.Store.InitDb(config.Store, true)
 				if err == nil {
-					log.Println("Database successfully reset.")
+					slog.Info("Database successfully reset.")
 				}
 			} else if *upgrade {
 				if databaseVersion > adapterVersion {
-					log.Fatalln(msg, "Unable to upgrade: database has greater version than the adapter.")
+					slog.Error(msg + "Unable to upgrade: database has greater version than the adapter.")
+					os.Exit(1)
 				}
-				log.Println(msg, "Upgrading the database.")
+				slog.Info(msg + "Upgrading the database.")
 				err = store.Store.UpgradeDb(config.Store)
 				if err == nil {
-					log.Println("Database successfully upgraded.")
+					slog.Info("Database successfully upgraded.")
 				}
 			} else {
-				log.Fatalln(msg, "Use --reset to reset, --upgrade to upgrade.")
+				slog.Error(msg + "Use --reset to reset, --upgrade to upgrade.")
+				os.Exit(1)
 			}
 		} else {
-			log.Fatalln("Failed to init DB adapter:", err)
+			slog.Error("Failed to init DB adapter:" + err.Error())
+			os.Exit(1)
 		}
 	} else if *reset {
-		log.Println("Reset requested. Dropping and recreating the database.")
+		slog.Info("Reset requested. Dropping and recreating the database.")
+		slog.Warn("Database reset requested. Dropping and recreating the database. This will lead to loss of the data")
 		err = store.Store.InitDb(config.Store, true)
 		if err == nil {
-			log.Println("Database successfully reset.")
+			slog.Info("Database successfully reset.")
+		} else {
+			slog.Warn("Database reset failed", "error", err)
 		}
 	} else {
-		log.Println("Database exists, version is correct.")
+		slog.Info("Database exists, version is correct.")
 	}
-	stats := store.Store.DbStats()
-	fmt.Println(stats())
+
 	// We need to get the Regexes from here: https://github.com/ua-parser/uap-core/blob/master/regexes.yaml
 	userAgentParser, err := uaparser.NewFromBytes(userAgentRegularExpressions)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error(err.Error())
+		os.Exit(1)
 	}
 
 	/*conn, err := dao.NewConnection(
@@ -199,13 +217,15 @@ func main() {
 	backupInterval := time.Duration(config.Backup.IntervalSeconds) * time.Second
 	backupService, err := backup.New(config.Backup.Enabled, backupInterval, config.Backup.Directory, compressionFactory)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error(err.Error())
+		os.Exit(1)
 	}
 
 	subscriptionService := makeSubscriptionService(&config)
 	err = subscriptionService.Load()
 	if err != nil {
-		log.Fatal(err)
+		slog.Error(err.Error())
+		os.Exit(1)
 	}
 	rumEventFactory := service.NewRumEventFactory(userAgentParser, geopIPService)
 	processingService := service.New(
@@ -217,15 +237,17 @@ func main() {
 	serverFactory := server.NewFactory(processingService, backupService)
 	servers, err := serverFactory.Build(config.Server)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error(err.Error())
+		os.Exit(1)
 	}
 
 	go processingService.Run()
 	startServers(servers)
 	if err := stopServers(servers, backupService); err != nil {
-		log.Fatalf("Shutdown Failed:%+v", err)
+		slog.Error(fmt.Sprintf("Shutdown Failed:%+v", err))
+		os.Exit(1)
 	}
-	log.Print("Servers exited properly")
+	slog.Info("Servers exited properly")
 }
 
 func makeSubscriptionService(conf *configType) service.ISubscriptionService {
@@ -242,17 +264,17 @@ func startServers(servers []*server.Server) {
 	for index, srv := range servers {
 		go func(srv *server.Server, index int) {
 			if err := srv.Serve(); err != nil {
-				log.Printf("error start server index[%v] err[%v]\n", index, err)
+				slog.Info(fmt.Sprintf("error start server index[%v] err[%v]\n", index, err))
 			}
 		}(srv, index)
 	}
-	log.Print("Servers started")
+	slog.Info("Servers started")
 
 	<-done
 }
 
 func stopServers(servers []*server.Server, backupService backup.IBackup) error {
-	log.Print("Stopping servers...")
+	slog.Info("Stopping servers...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer func() {
@@ -266,7 +288,7 @@ func stopServers(servers []*server.Server, backupService backup.IBackup) error {
 		serverCopy := srv
 		g.Go(func() error {
 			if err := serverCopy.Shutdown(ctx); err != nil {
-				log.Printf("Server Shutdown Failed:%+v", err)
+				slog.Error(fmt.Sprintf("Server Shutdown Failed:%+v", err))
 				return err
 			}
 			return nil

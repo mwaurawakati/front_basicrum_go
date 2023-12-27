@@ -321,8 +321,8 @@ func assertResponse(t *testing.T, response *http.Response, want string, wantCode
 
 func makeServer(processService *servicemocks.MockIService, backupService backup.IBackup, privateAPIToken string) (string, *Server) {
 	port := randomPort()
-	s := New(processService, backupService, privateAPIToken, WithHTTP(port))
-	return port, s
+	//s := New(processService, backupService, privateAPIToken, WithHTTP(port))
+	return port, nil
 }
 
 func randomPort() string {

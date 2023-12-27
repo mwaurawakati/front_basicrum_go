@@ -2,7 +2,8 @@ package backup
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/basicrum/front_basicrum_go/types"
@@ -43,7 +44,7 @@ func NewSingleFileBackup(
 func (b *SingleFileBackup) Compress() {
 	day := time.Now().UTC().AddDate(0, 0, -1)
 	if err := archiveDay(b.directory, day, b.compressionFactory); err != nil {
-		log.Printf("error archive day[%v] err[%v]", day, err)
+		slog.Error(fmt.Sprintf("error archive day[%v] err[%v]", day, err))
 	}
 }
 
@@ -55,11 +56,11 @@ func (b *SingleFileBackup) SaveAsync(event *types.Event) {
 		// Flatten headers later
 		h, hErr := json.Marshal(forArchiving)
 		if hErr != nil {
-			log.Println(hErr)
+			slog.Error(hErr.Error())
 		}
 		forArchiving.Add("request_headers", string(h))
 		if err := b.batcher.Run(forArchiving); err != nil {
-			log.Printf("Error archiving expired url[%v] err[%v]", forArchiving, err)
+			slog.Error(fmt.Sprintf("Error archiving expired url[%v] err[%v]", forArchiving, err))
 		}
 	}()
 }

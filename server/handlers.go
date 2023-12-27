@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,23 +19,45 @@ const (
 )
 
 func (s *Server) catcher(w http.ResponseWriter, r *http.Request) {
-	log.Println("Catcher called")
 	// return no cache headers
-	s.responseNoContent(w)
+	if r.Method == http.MethodGet {
 
-	// create an event from http request
-	event, err := newEventFromRequest(r)
-	log.Println(event)
-	if err != nil {
-		log.Printf("failed to parse request %+v", err)
+		myArray := s.service.GetData()
+
+		// Encode the array to JSON
+		jsonData, err := json.Marshal(myArray)
+		if err != nil {
+			http.Error(w, "Failed to encode JSON", http.StatusInternalServerError)
+			return
+		}
+
+		// Set the Content-Type header to indicate JSON response
+		w.Header().Set("Content-Type", "application/json")
+
+		// Write the JSON response
+		w.Write(jsonData)
 		return
+	} else if r.Method == http.MethodPost {
+		s.responseNoContent(w)
+
+		// create an event from http request
+		event, err := newEventFromRequest(r)
+		slog.Info("", "event", event)
+		if err != nil {
+			slog.Error("failed to parse request", "error", err)
+			return
+		}
+
+		// Persist Event async in ClickHouse
+		s.service.SaveAsync(event)
+
+		// Archiving logic - save the event to a file
+		s.backup.SaveAsync(event)
+	} else {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = w.Write([]byte("method not allowed"))
+
 	}
-
-	// Persist Event async in ClickHouse
-	s.service.SaveAsync(event)
-
-	// Archiving logic - save the event to a file
-	s.backup.SaveAsync(event)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

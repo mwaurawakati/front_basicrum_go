@@ -24,24 +24,6 @@ type MigrationDAO struct {
 	prefix             string
 }
 
-// New creates persistance service
-// nolint: revive
-func NewMigrationDAO(s server, a auth, opts *opts) *MigrationDAO {
-	return &MigrationDAO{
-		migrateDatabaseURL: migrateDBURL(s, a),
-		prefix:             opts.prefix,
-	}
-}
-
-func migrateDBURL(s server, a auth) string {
-	return fmt.Sprintf("clickhouse://%v:%v@%v/%v?sslmode=disable",
-		a.user,
-		a.pwd,
-		s.addr(),
-		s.db,
-	)
-}
-
 // Migrate applies all pending database migrations
 func (p *MigrationDAO) Migrate() error {
 	tempDir, err := os.MkdirTemp("", "migrations")

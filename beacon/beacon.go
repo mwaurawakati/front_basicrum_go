@@ -2,7 +2,7 @@ package beacon
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/url"
 	"strconv"
 	"strings"
@@ -131,6 +131,12 @@ type Beacon struct {
 	Dom_Link_Css   string
 	Net_Sd         string
 	Sb             string
+
+	Up         string
+	Latency    string
+	StatusCode string
+	Cdir       string
+	Ans        string
 }
 
 // FromEvent creates Beacon request from http request parameters
@@ -252,22 +258,27 @@ func FromEvent(event *types.Event) Beacon {
 		Dom_Link_Css:   values.Get("dom.link.css"),
 		Net_Sd:         values.Get("net.sd"),
 		Sb:             values.Get("sb"),
+		Up:             values.Get("up"),
+		Latency:        values.Get("latency"),
+		StatusCode:     values.Get("status_code"),
+		Cdir:           values.Get("cdir"),
+		Ans:            values.Get("ans"),
 	}
 }
 
 // ConvertToRumEvent convert Beacon request to Rum Event
 func ConvertToRumEvent(b Beacon, event *types.Event, userAgentParser *uaparser.Parser, geoIPService geoip.Service) RumEvent {
-	userAgent := event.UserAgent
+	//userAgent := event.UserAgent
 
-	userAgentClient := userAgentParser.Parse(userAgent)
+	//userAgentClient := userAgentParser.Parse(userAgent)
 
-	deviceType := getDeviceType(userAgent)
+	//deviceType := getDeviceType(userAgent)
 
-	screenWidth, screenHeight := getScreenSize(b.Scr_Xy)
+	//screenWidth, screenHeight := getScreenSize(b.Scr_Xy)
 
 	urlValue, err := url.Parse(b.U)
 	if err != nil {
-		log.Println(err)
+		slog.Error(err.Error())
 	}
 
 	hostname := urlValue.Hostname()
@@ -278,9 +289,9 @@ func ConvertToRumEvent(b Beacon, event *types.Event, userAgentParser *uaparser.P
 	}
 
 	return RumEvent{
-		Created_At:               b.CreatedAt,
-		Hostname:                 hostname,
-		Url:                      b.U,
+		Created_At: b.CreatedAt,
+		Hostname:   hostname,
+		/*Url:                      b.U,
 		Cumulative_Layout_Shift:  json.Number(b.C_Cls),
 		Device_Type:              deviceType,
 		Device_Manufacturer:      userAgentClient.Device.Brand,
@@ -299,43 +310,51 @@ func ConvertToRumEvent(b Beacon, event *types.Event, userAgentParser *uaparser.P
 		Largest_Contentful_Paint: b.Pt_Lcp,
 		Event_Type:               getEventType(b.Rt_Quit, b.Http_Initiator),
 		Session_Id:               b.Rt_Si,
-		Session_Length:           b.Rt_Sl,
-		Geo_Country_Code:         country,
-		Geo_City_Name:            city,
-		Next_Hop_Protocol:        b.Nt_Protocol,
-		User_Agent:               userAgent,
-		Visibility_State:         b.Vis_St,
-		Boomerang_Version:        b.V,
-		Screen_Width:             screenWidth,
-		Screen_Height:            screenHeight,
-		Dom_Res:                  b.Dom_Res,
-		Dom_Doms:                 b.Dom_Doms,
-		Mem_Total:                b.Mem_Total,
-		Mem_Limit:                b.Mem_Limit,
-		Mem_Used:                 b.Mem_Used,
-		Mem_Lsln:                 b.Mem_Lsln,
-		Mem_Ssln:                 b.Mem_Ssln,
-		Mem_Lssz:                 b.Mem_Lssz,
-		Scr_Bpp:                  b.Scr_Bpp,
-		Scr_Orn:                  b.Scr_Orn,
-		Cpu_Cnc:                  b.Cpu_Cnc,
-		Dom_Ln:                   b.Dom_Ln,
-		Dom_Sz:                   b.Dom_Sz,
-		Dom_Ck:                   b.Dom_Ck,
-		Dom_Img:                  b.Dom_Img,
-		Dom_Img_Uniq:             b.Dom_Img_Uniq,
-		Dom_Script:               b.Dom_Script,
-		Dom_Script_Ext:           b.Dom_Script_Ext,
-		Dom_Iframe:               b.Dom_Iframe,
-		Dom_Link:                 b.Dom_Link,
-		Dom_Link_Css:             b.Dom_Link_Css,
-		Page_Id:                  b.Pid,
-		Ua_Vnd:                   b.Ua_Vnd,
-		Ua_Plt:                   b.Ua_Plt,
-		Data_Saver_On:            json.Number(b.Net_Sd),
-		Mob_Etype:                b.Mob_Etype,
-		Mob_Dl:                   json.Number(b.Mob_Dl),
-		Mob_Rtt:                  json.Number(b.Mob_Rtt),
+		Session_Length:           b.Rt_Sl,*/
+		Country:       country,
+		Geo_City_Name: city, /*
+			Next_Hop_Protocol:        b.Nt_Protocol,
+			User_Agent:               userAgent,
+			Visibility_State:         b.Vis_St,
+			Boomerang_Version:        b.V,
+			Screen_Width:             screenWidth,
+			Screen_Height:            screenHeight,
+			Dom_Res:                  b.Dom_Res,
+			Dom_Doms:                 b.Dom_Doms,
+			Mem_Total:                b.Mem_Total,
+			Mem_Limit:                b.Mem_Limit,
+			Mem_Used:                 b.Mem_Used,
+			Mem_Lsln:                 b.Mem_Lsln,
+			Mem_Ssln:                 b.Mem_Ssln,
+			Mem_Lssz:                 b.Mem_Lssz,
+			Scr_Bpp:                  b.Scr_Bpp,
+			Scr_Orn:                  b.Scr_Orn,
+			Cpu_Cnc:                  b.Cpu_Cnc,
+			Dom_Ln:                   b.Dom_Ln,
+			Dom_Sz:                   b.Dom_Sz,
+			Dom_Ck:                   b.Dom_Ck,
+			Dom_Img:                  b.Dom_Img,
+			Dom_Img_Uniq:             b.Dom_Img_Uniq,
+			Dom_Script:               b.Dom_Script,
+			Dom_Script_Ext:           b.Dom_Script_Ext,
+			Dom_Iframe:               b.Dom_Iframe,
+			Dom_Link:                 b.Dom_Link,
+			Dom_Link_Css:             b.Dom_Link_Css,
+			Page_Id:                  b.Pid,
+			Ua_Vnd:                   b.Ua_Vnd,
+			Ua_Plt:                   b.Ua_Plt,
+			Data_Saver_On:            json.Number(b.Net_Sd),
+			Mob_Etype:                b.Mob_Etype,
+			Mob_Dl:                   json.Number(b.Mob_Dl),
+			Mob_Rtt:                  json.Number(b.Mob_Rtt),*/
+		Up: json.Number(b.Up),
+
+		Latency:    json.Number(b.Latency),
+		StatusCode: json.Number(b.StatusCode),
+		//UserAgent: userAgent,
+		//UserAgentClient: userAgentClient,
+		Ans:  json.Number(b.Ans),
+		Cdir: b.Cdir,
 	}
 }
 

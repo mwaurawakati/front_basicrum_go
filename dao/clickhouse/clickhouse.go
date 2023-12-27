@@ -7,10 +7,14 @@ package clickhouse
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -31,15 +35,13 @@ type adapter struct {
 
 const (
 	defaultHost     = "localhost:9000"
-	defaultDatabase = "default"
+	defaultDatabase = "rum"
 
-	adpVersion = 113
+	adpVersion = 1
 
 	adapterName = "clickhouse"
 
 	defaultMaxResults = 1024
-	// This is capped by the Session's send queue limit (128).
-	defaultMaxMessageResults = 100
 )
 
 const (
@@ -64,6 +66,7 @@ type configType struct {
 	MaxOpen           int         `json:"max_open,omitempty"`
 	DiscoverHosts     bool        `json:"discover_hosts,omitempty"`
 	HostDecayDuration int         `json:"host_decay_duration,omitempty"`
+	TablePrefix       string      `json:"tableprefix"`
 }
 
 // Open initializes rethinkdb session
@@ -112,7 +115,7 @@ func (a *adapter) Open(jsonconfig json.RawMessage) error {
 		a.maxResults = defaultMaxResults
 	}
 
-	opts.Auth.Database = a.dbName
+	//opts.Auth.Database = a.dbName
 	opts.Auth.Username = config.Username
 	opts.Auth.Password = config.Password
 	opts.DialTimeout = time.Duration(config.Timeout) * time.Second
@@ -144,15 +147,145 @@ func (a *adapter) Close() error {
 
 // GetDbVersion returns current database version.
 func (a *adapter) CheckDbVersion() error {
+	version, err := a.GetDbVersion()
+	if err != nil {
+		return err
+	}
+
+	if version != adpVersion {
+		return errors.New("Invalid database version " + strconv.Itoa(version) +
+			". Expected " + strconv.Itoa(adpVersion))
+	}
+
 	return nil
 }
 
 func (a *adapter) CreateDb(reset bool) error {
+	ctx := context.Background()
+	if reset {
+		if err := a.conn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s;", a.dbName)); err != nil {
+			return err
+		}
+		slog.Info("DATABASE DROPED")
+	}
+
+	if err := a.conn.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s ENGINE = Memory COMMENT 'The rum database';", a.dbName)); err != nil {
+		return err
+	}
+	
+	if err := a.conn.Exec(ctx, "USE "+a.dbName); err != nil {
+		return err
+	}
+	if err := a.conn.Exec(ctx, "CREATE TABLE kvmeta(`key`  VARCHAR(64) NOT NULL,createdat   DateTime DEFAULT now(), `value`     TEXT,  PRIMARY KEY(`key`))"+
+		"ENGINE = MergeTree;"); err != nil {
+		return err
+	}
+	if err := a.conn.Exec(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %swebperf_rum_hostnames (
+		hostname                        LowCardinality(String),
+		updated_at                      DateTime64(3) DEFAULT now()
+	)
+	ENGINE = ReplacingMergeTree
+	PARTITION BY hostname
+	ORDER BY hostname
+	SETTINGS index_granularity = 8192`, a.prefix)); err!= nil {
+        return err
+    }
+
+	if err := a.conn.Exec(ctx, `CREATE TABLE latency(
+		id     INT NOT NULL,
+		cdir TEXT NOT NULL,
+		server_id INT,
+		ans INT NOT NULL,
+		up INT NOT NULL,
+		status_code INT NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT NOW(),
+		latency INT NOT NULL,
+		country TEXT NOT NULL,
+		PRIMARY KEY (id)
+		)
+	ENGINE = MergeTree
+	SETTINGS index_granularity = 8192`); err!= nil {
+        return err
+    }
+	if err := a.conn.Exec(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %swebperf_rum_own_hostnames (
+		username                        LowCardinality(String),
+		hostname                        LowCardinality(String),
+		subscription_id                 String,
+		subscription_expire_at          DateTime64(3) NOT NULL,
+		updated_at                      DateTime64(3) DEFAULT now(),
+		INDEX index_username username TYPE bloom_filter GRANULARITY 1
+	)
+	ENGINE = ReplacingMergeTree(updated_at)
+	ORDER BY hostname
+	PARTITION BY hostname
+	PRIMARY KEY hostname
+	`, a.prefix)); err != nil {
+		return err
+	}
+
+	if err := a.conn.Exec(ctx, fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %swebperf_rum_grant_hostnames (
+		username                        LowCardinality(String),
+		hostname                        LowCardinality(String),
+		owner_username                  LowCardinality(String),
+		updated_at                      DateTime64(3) DEFAULT now(),
+		INDEX index_owner owner_username TYPE bloom_filter GRANULARITY 1
+	)
+	ENGINE = ReplacingMergeTree(updated_at)
+	ORDER BY (username, hostname)
+	PARTITION BY username
+	PRIMARY KEY (username, hostname)`, a.prefix) ); err != nil{
+		return err
+	}
+	slog.Info("Created all tables in database")
+	if err := a.conn.Exec(ctx, fmt.Sprintf(`CREATE OR REPLACE VIEW %swebperf_rum_view_hostnames AS 
+	SELECT username, hostname, 'owner' as role_name
+	FROM %swebperf_rum_own_hostnames FINAL
+	UNION ALL
+	SELECT username, hostname, 'granted' as role_name
+	FROM %swebperf_rum_grant_hostnames FINAL`, a.prefix, a.prefix, a.prefix)); err != nil {
+		return err
+    }
+	if err := a.conn.Exec(ctx, "INSERT INTO rum.kvmeta(`key`, `value`) VALUES('version',?)", adpVersion); err != nil {
+		return err
+	}
 	return nil
 }
 
 func (a *adapter) GetDbVersion() (int, error) {
-	return -1, nil
+	if a.version > 0 {
+		return a.version, nil
+	}
+
+	ctx := context.Background()
+	var vers int
+	rows, err := a.conn.Query(ctx, "SELECT `value` FROM rum.kvmeta WHERE `key`='version'")
+	if err != nil {
+		if a.isMissingDb(err) || isMissingTable(err) || err == sql.ErrNoRows {
+			err = errors.New("Database not initialized")
+		}
+		slog.Error(err.Error(), "is missing database", a.isMissingDb(err))
+		return -1, err
+	}
+
+	defer rows.Close()
+
+	if !rows.Next() {
+		// nolint: nilnil
+		return -1, errors.New("Database not initialized")
+	}
+
+	var result string
+	err = rows.Scan(&result)
+	if err != nil {
+		return -1, fmt.Errorf("get subscription failed: %w", err)
+	}
+	vers, err = strconv.Atoi(result)
+	if err != nil {
+		slog.Error(err.Error())
+	}
+	a.version = vers
+
+	return vers, nil
 }
 
 func (a *adapter) GetName() string {
@@ -180,7 +313,7 @@ func (a *adapter) Stats() interface{} {
 	if a.conn == nil {
 		return nil
 	}
-
+	// TODO: Implement DB connection stats
 	return nil
 }
 
@@ -194,18 +327,9 @@ func (adapter) Version() int {
 }
 
 // Save stores data into table in clickhouse database
-func (p *adapter) Save(rumEvent beacon.RumEvent) error {
-	jsonValue, err := json.Marshal(rumEvent)
-	if err != nil {
-		return fmt.Errorf("json[%+v] parsing error: %w", rumEvent, err)
-	}
-	data := string(jsonValue)
-	query := fmt.Sprintf(
-		"INSERT INTO %s SETTINGS input_format_skip_unknown_fields = true FORMAT JSONEachRow %s",
-		p.prefix+baseTableName,
-		data,
-	)
-	err = p.conn.AsyncInsert(context.Background(), query, false)
+func (p *adapter) Save(event beacon.RumEvent) error {
+	// TODO: Implement AsyncInsert
+	err := p.conn.Exec(context.Background(), "INSERT INTO rum.latency(cdir,ans,up,status_code,created_at,country, latency) VALUES(?,?,?,?,?,?,?)", event.Cdir, event.Ans, event.Up, event.StatusCode, event.Created_At, event.Country, event.Latency)
 	if err != nil {
 		return fmt.Errorf("clickhouse insert failed: %w", err)
 	}
@@ -219,7 +343,7 @@ func (p *adapter) SaveHost(event beacon.HostnameEvent) error {
 		return err
 	}
 	query := fmt.Sprintf(
-		"INSERT INTO %s%s SETTINGS input_format_skip_unknown_fields = true FORMAT JSONEachRow %s",
+		"INSERT INTO rum.%s%s SETTINGS input_format_skip_unknown_fields = true FORMAT JSONEachRow %s",
 		p.prefix,
 		baseHostsTableName,
 		data,
@@ -234,7 +358,7 @@ func (p *adapter) SaveHost(event beacon.HostnameEvent) error {
 // InsertOwnerHostname inserts a new hostname
 func (p *adapter) InsertOwnerHostname(item types.OwnerHostname) error {
 	query := fmt.Sprintf(
-		"INSERT INTO %s%s(username, hostname, subscription_id, subscription_expire_at) VALUES(?,?,?,?)",
+		"INSERT INTO rum.%s%s(username, hostname, subscription_id, subscription_expire_at) VALUES(?,?,?,?)",
 		p.prefix,
 		baseOwnerHostsTableName,
 	)
@@ -244,7 +368,7 @@ func (p *adapter) InsertOwnerHostname(item types.OwnerHostname) error {
 // DeleteOwnerHostname deletes the hostname
 func (p *adapter) DeleteOwnerHostname(hostname, username string) error {
 	query := fmt.Sprintf(
-		"DELETE FROM %s%s WHERE hostname = ? AND username = ?",
+		"DELETE FROM rum.%s%s WHERE hostname = ? AND username = ?",
 		p.prefix,
 		baseOwnerHostsTableName,
 	)
@@ -254,7 +378,7 @@ func (p *adapter) DeleteOwnerHostname(hostname, username string) error {
 // GetSubscriptions gets all subscriptions
 func (p *adapter) GetSubscriptions() (map[string]*types.SubscriptionWithHostname, error) {
 	query := fmt.Sprintf(
-		"SELECT subscription_id, subscription_expire_at, hostname FROM %v%v FINAL",
+		"SELECT subscription_id, subscription_expire_at, hostname FROM rum.%v%v FINAL",
 		p.prefix,
 		baseOwnerHostsTableName,
 	)
@@ -283,7 +407,7 @@ func (p *adapter) GetSubscriptions() (map[string]*types.SubscriptionWithHostname
 func (p *adapter) GetSubscription(id string) (*types.SubscriptionWithHostname, error) {
 	query := fmt.Sprintf(`
 	SELECT subscription_id, subscription_expire_at, hostname
-	FROM %v%v FINAL
+	FROM rum.%v%v FINAL
 	WHERE subscription_id = ?
 	`,
 		p.prefix,
@@ -309,6 +433,71 @@ func (p *adapter) GetSubscription(id string) (*types.SubscriptionWithHostname, e
 	return &result, nil
 }
 
+// Get event record returns a record of events
+func (p *adapter) GetEvents() (any, error) {
+	rows, err := p.conn.Query(context.Background(), `SELECT * FROM rum.latency`)
+	if err != nil {
+		return nil, fmt.Errorf("get subscription failed: %w", err)
+	}
+
+	/*if !rows.Next() {
+		// nolint: nilnil
+		return nil, nil
+	}*/
+
+	var subs []any
+	for rows.Next() {
+		sub := struct {
+			ID         int32     `json:"id"`
+			Cdir       string    `json:"cdir"`
+			ServerID   int32       `json:"server_id"`
+			Ans        int32     `json:"ans"`
+			Up         int32     `json:"up"`
+			StatusCode int32     `json:"status_code"`
+			Created_At time.Time `json:"created_at"`
+			Latency    int32       `json:"latency"`
+			Country    string    `json:"country"	`
+		}{}
+		if err = rows.Scan(
+			&sub.ID, &sub.Cdir, &sub.ServerID,
+			&sub.Ans, &sub.Up, &sub.StatusCode, &sub.Created_At,
+			&sub.Latency, &sub.Country); err != nil {
+			break
+		}
+		subs = append(subs, sub)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	return subs, err
+}
+
 func init() {
 	store.RegisterAdapter(&adapter{})
+}
+
+func isMissingTable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.Contains(err.Error(), "Table") {
+		return true
+	} else {
+		return false
+	}
+	return false
+	return false
+}
+
+func (a *adapter) isMissingDb(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.Contains(err.Error(), fmt.Sprintf(" Database %s does not exist", a.dbName)) {
+		return true
+	} else {
+		return false
+	}
+	return false
 }

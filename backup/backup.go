@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/url"
 	"os"
 	"path"
@@ -41,7 +41,7 @@ func backupItem(backupsList map[string]string, p any) {
 func makeKeyHostname(v url.Values) string {
 	urlValue, parseErr := url.Parse(v.Get("u"))
 	if parseErr != nil {
-		log.Print(parseErr)
+		slog.Error("", parseErr)
 	}
 	return strings.ReplaceAll(urlValue.Hostname(), ".", "_")
 }
@@ -53,7 +53,7 @@ func makeValue(v url.Values) string {
 func toJSON(flatten any) string {
 	dataJson, reqDataErr := json.Marshal(flatten)
 	if reqDataErr != nil {
-		log.Print(reqDataErr)
+		slog.Error(reqDataErr.Error())
 	}
 	return string(dataJson)
 }
@@ -83,7 +83,7 @@ func saveLinesToFile(backupRootDir string, host string, lines string) {
 	filename := makeFilePath(backupRootDir, host)
 	err := appendToFile(filename, lines)
 	if err != nil {
-		log.Print(err)
+		slog.Error(err.Error())
 	}
 }
 
@@ -91,7 +91,7 @@ func appendToFile(filename string, lines string) error {
 	f := openOrCreateFileForAppend(filename)
 	go func() {
 		if err := f.Close(); err != nil {
-			log.Print(err)
+			slog.Error(err.Error())
 		}
 	}()
 
@@ -116,19 +116,19 @@ func writeToFile(filename string, lines string, factory CompressionWriterFactory
 
 func closeWriter(f io.Closer) {
 	if err := f.Close(); err != nil {
-		log.Print(err)
+		slog.Error(err.Error())
 	}
 }
 
 func openOrCreateFileForAppend(filename string) *os.File {
 	err := os.MkdirAll(path.Dir(filename), os.ModePerm)
 	if err != nil {
-		log.Print(err)
+		slog.Error(err.Error())
 	}
 
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, os.ModePerm)
 	if err != nil {
-		log.Print(err)
+		slog.Error(err.Error())
 	}
 	return f
 }

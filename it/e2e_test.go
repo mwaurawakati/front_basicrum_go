@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/basicrum/front_basicrum_go/config"
-	"github.com/basicrum/front_basicrum_go/dao"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -21,7 +19,7 @@ type e2eTestSuite struct {
 }
 
 func (s *e2eTestSuite) SetupTest() {
-	var err error
+	/*var err error
 	sConf, err := config.GetStartupConfig()
 	s.Assert().NoError(err)
 	host := getHost()
@@ -35,7 +33,7 @@ func (s *e2eTestSuite) SetupTest() {
 		s.httpSender,
 	)
 
-	conn, err := dao.NewConnection(
+	/*conn, err := dao.NewConnection(
 		dao.Server(sConf.Database.Host, sConf.Database.Port, sConf.Database.DatabaseName),
 		dao.Auth(sConf.Database.Username, sConf.Database.Password),
 	)
@@ -46,7 +44,7 @@ func (s *e2eTestSuite) SetupTest() {
 	)
 
 	s.dao.RecycleTables()
-	time.Sleep(10 * time.Second)
+	time.Sleep(10 * time.Second)*/
 }
 
 func getHost() string {

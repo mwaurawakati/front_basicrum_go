@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 
@@ -74,7 +74,7 @@ func (f *Factory) Build(jsonconfig json.RawMessage) ([]*Server, error) {
 	httpsPort := defaultValue(sConf.Port, defaultHTTPSPort)
 
 	if !sConf.SSL {
-		log.Println("HTTP configuration enabled")
+		slog.Info("HTTP configuration enabled")
 		httpServer := New(
 			f.processService,
 			f.backupService,
@@ -84,11 +84,11 @@ func (f *Factory) Build(jsonconfig json.RawMessage) ([]*Server, error) {
 		return []*Server{httpServer}, nil
 	}
 
-	log.Printf("SSL configuration enabled type[%v]\n", sConf.SSLType)
+	slog.Info(fmt.Sprintf("SSL configuration enabled type[%v]\n", sConf.SSLType))
 	switch sConf.SSLType {
 	case SSLTypeLetsEncrypt:
 		allowedHost := sConf.Domain
-		log.Printf("SSL Let's Encrypt allowedHost[%v]\n", allowedHost)
+		slog.Info(fmt.Sprintf("SSL Let's Encrypt allowedHost[%v]\n", allowedHost))
 		tlsConfig := makeLetsEncryptTLSConfig(allowedHost)
 		httpsServer := New(
 			f.processService,
@@ -104,7 +104,7 @@ func (f *Factory) Build(jsonconfig json.RawMessage) ([]*Server, error) {
 		)
 		return []*Server{httpsServer, httpServer}, nil
 	case SSLTypeFile:
-		log.Println("SSL files configuration enabled")
+		slog.Info("SSL files configuration enabled")
 		httpsServer := New(
 			f.processService,
 			f.backupService,
